@@ -1,0 +1,74 @@
+{
+    "DJ3-A06": {
+        "robot_point": "LM1006",
+        "ofset_arm": 0
+    },
+    "DJ3-A07": {
+        "robot_point": "LM1007",
+        "ofset_arm": 5
+    },
+    "DJ3-A08": {
+        "robot_point": "LM1008",
+        "ofset_arm": 10
+    },
+    "DJ3-A09": {
+        "robot_point": "LM1009",
+        "ofset_arm": 5
+    },
+    "DJ3-A10": {
+        "robot_point": "LM1010",
+        "ofset_arm": 10
+    },
+    "DJ3-A11": {
+        "robot_point": "LM1011",
+        "ofset_arm": 8
+    },
+    "DJ3-A12": {
+        "robot_point": "LM1012",
+        "ofset_arm": 9
+    },
+    "DJ3-A13": {
+        "robot_point": "LM1013",
+        "ofset_arm": 3
+    },
+    "DJ3-A14": {
+        "robot_point": "LM1014",
+        "ofset_arm": 2
+    },
+    "DJ3-B06": {
+        "robot_point": "LM1106",
+        "ofset_arm": 0
+    },
+    "DJ3-B07": {
+        "robot_point": "LM1107",
+        "ofset_arm": 0
+    },
+    "DJ3-B08": {
+        "robot_point": "LM1108",
+        "ofset_arm": 0
+    },
+    "DJ3-B09": {
+        "robot_point": "LM1109",
+        "ofset_arm": 0
+    },
+    "DJ3-B10": {
+        "robot_point": "LM1110",
+        "ofset_arm": 5
+    },
+    "DJ3-B11": {
+        "robot_point": "LM1111",
+        "ofset_arm": 5
+    },
+    "DJ3-B12": {
+        "robot_point": "LM1112",
+        "ofset_arm": 0
+    },
+    "DJ3-B13": {
+        "robot_point": "LM1113",
+        "ofset_arm": 2
+    },
+    "DJ3-B14": {
+        "robot_point": "LM1114",
+        "ofset_arm": 2
+    }
+}
