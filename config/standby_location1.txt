@@ -1,0 +1,68 @@
+// {
+//     "location_name": "charging_1",
+//     "location_type": "charging",
+//     "position_location": {
+//         "located_in_area": "22",
+//         "seer_position": "LM337",
+//         "floor": 1,
+//         "map_code": "pickup_locations",
+//         "location_status": 5
+//     },
+//     "location_initial": true
+// }
+// {
+//     "location_name": "charging_2",
+//     "location_type": "charging",
+//     "position_location": {
+//         "located_in_area": "22",
+//         "seer_position": "LM9204",
+//         "floor": 1,
+//         "map_code": "pickup_locations",
+//         "location_status": 5
+//     },
+//     "location_initial": true
+// }
+// {
+//     "location_name": "waiting_1",
+//     "location_type": "charging",
+//     "position_location": {
+//         "located_in_area": "22",
+//         "seer_position": "LM9205",
+//         "floor": 1,
+//         "map_code": "pickup_locations",
+//         "location_status": 5
+//     },
+//     "location_initial": true
+// }
+// {
+//     "location_name": "waiting_2",
+//     "location_type": "charging",
+//     "position_location": {
+//         "located_in_area": "22",
+//         "seer_position": "LM137",
+//         "floor": 1,
+//         "map_code": "pickup_locations",
+//         "location_status": 5
+//     },
+//     "location_initial": true
+// }
+// {
+//     "location_name": "waiting_2",
+//     "location_type": "charging",
+//     "position_location": {
+//         "located_in_area": "22",
+//         "seer_position": "LM9026",
+//         "floor": 1,
+//         "map_code": "pickup_locations",
+//         "location_status": 5
+//     },
+//     "location_initial": true
+// }
+// hàng thành phẩm LM15
+// hàng thành LỖI LM9027
+// DETECH , ROBOT
+// empty_1 : LM9211, 9210 ,
+// EMTYPE5 : 9209, 9208,
+// M2 : 132,131
+// M3 : 913, 12
+// M4 : 9138, 128
