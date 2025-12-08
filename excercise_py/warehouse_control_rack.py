@@ -1,0 +1,544 @@
+from pymongo import MongoClient, ASCENDING
+from datetime import datetime, UTC  # ✅ Import UTC theo yêu cầu
+from typing import Optional, Dict, List
+import uuid
+from enum import Enum
+
+
+# ------------------------------------------------------------------------------
+# TRẠNG THÁI
+# ------------------------------------------------------------------------------
+class RackStatus(Enum):
+    EMPTY = "empty"
+    PARTIAL = "partial"
+    FULL = "full"
+
+
+class PositionStatus(Enum):
+    EMPTY = "empty"
+    OCCUPIED = "occupied"
+    FULL = "full"
+
+
+class TransactionType(Enum):
+    INBOUND = "inbound"
+    OUTBOUND = "outbound"
+
+
+# ------------------------------------------------------------------------------
+# BẢNG ĐIỀU KHIỂN KHO
+# ------------------------------------------------------------------------------
+class WarehouseMultiRackFIFO:
+    def __init__(
+        self,
+        mongo_uri: str = "mongodb://localhost:27017/",
+        db_name: str = "astra",
+    ):
+        """Khởi tạo kết nối MongoDB"""
+        self.client = MongoClient(mongo_uri)
+        self.db = self.client[db_name]
+        self.racks = self.db.racks
+        self.transactions = self.db.transactions
+
+        # Tạo index cho tìm kiếm nhanh
+        self.racks.create_index(
+            [("product_id", ASCENDING), ("available_count", ASCENDING)]
+        )
+        self.racks.create_index([("status", ASCENDING)])
+
+        # Xóa dữ liệu cũ để demo
+        # self.racks.delete_many({})
+        # self.transactions.delete_many({})
+
+    # --------------------------------------------------------------------------
+    # TẠO RACK
+    # --------------------------------------------------------------------------
+    def create_rack(self, rack_code: str) -> Dict:
+        """Tạo rack mới với 4 vị trí cố định"""
+
+        if self.racks.find_one({"rack_code": rack_code}):
+            raise ValueError(f"❌ Rack {rack_code} đã tồn tại")
+
+        rack = {
+            "rack_code": rack_code,
+            "capacity": 4,
+            "occupied_count": 0,
+            "available_count": 4,
+            "actually_goods": 0,
+            "location_type": 3,
+            "status": RackStatus.EMPTY.value,
+            "product_id": None,
+            "positions": [
+                {
+                    "position_index": 0,
+                    "slot_id": f"{rack_code}-P0",
+                    "status": "empty",
+                    "robot_point": ["LM00", "LM01"],
+                    "item": None,
+                },
+                {
+                    "position_index": 1,
+                    "slot_id": f"{rack_code}-P1",
+                    "status": "empty",
+                    "robot_point": ["LM10", "LM11"],
+                    "item": None,
+                },
+                {
+                    "position_index": 2,
+                    "slot_id": f"{rack_code}-P2",
+                    "status": "empty",
+                    "robot_point": ["LM20", "LM21"],
+                    "item": None,
+                },
+                {
+                    "position_index": 3,
+                    "slot_id": f"{rack_code}-P3",
+                    "status": "empty",
+                    "robot_point": ["LM30", "LM31"],
+                    "item": None,
+                },
+            ],
+            "created_at": datetime.now(UTC),  # ✅ Đúng syntax datetime
+            "updated_at": datetime.now(UTC),  # ✅ Đúng syntax datetime
+        }
+
+        self.racks.insert_one(rack)
+        print(f"✅ Tạo rack thành công: {rack_code}")
+        return rack
+
+    # --------------------------------------------------------------------------
+    # VALIDATION: NGĂN CHẶN TẠO LỖ TRỐNG KHI NHẬP HÀNG
+    # --------------------------------------------------------------------------
+    def _validate_inbound_position(self, rack: Dict, position_index: int) -> bool:
+        """Kiểm tra vị trí nhập có tuân theo quy tắc P3→P2→P1→P0 không"""
+
+        leftmost_occupied = None
+        for i in range(4):
+            if rack["positions"][i]["status"] == "occupied":
+                leftmost_occupied = i
+                break
+
+        # Trường hợp 1: Rack trống → chỉ cho phép nhập P3
+        if leftmost_occupied is None:
+            return position_index == 3
+
+        # Trường hợp 2: Rack đã có hàng → chỉ cho phép nhập vào vị trí liền kề phía trước
+        allowed_position = leftmost_occupied - 1
+        return position_index == allowed_position
+
+    # --------------------------------------------------------------------------
+    # TÌM VỊ TRÍ NHẬP/XUẤT TRONG RACK
+    # --------------------------------------------------------------------------
+    def _find_inbound_position_in_rack(self, rack: Dict) -> Optional[int]:
+        """Tìm vị trí nhập hợp lệ theo quy tắc P3→P2→P1→P0"""
+        leftmost_occupied = None
+        for i in range(4):
+            if rack["positions"][i]["status"] == "occupied":
+                leftmost_occupied = i
+                break
+        return (
+            3
+            if leftmost_occupied is None
+            else (leftmost_occupied - 1) if (leftmost_occupied - 1) >= 0 else None
+        )
+
+    def _find_outbound_position_in_rack(self, rack: Dict) -> Optional[int]:
+        for i in range(3, -1, -1):
+            if rack["positions"][i]["status"] == "full":
+                return i
+        return None
+
+    # --------------------------------------------------------------------------
+    # TỰ ĐỘNG TÌM TẤT CẢ RACK PHÙ HỢP CHO SẢN PHẨM
+    # --------------------------------------------------------------------------
+    def find_available_rack_for_product(self, product_id: str) -> List[Dict]:
+
+        available_racks = []
+
+        existing_racks = list(
+            self.racks.find(
+                {"product_id": product_id, "available_count": {"$gt": 0}}
+            ).sort("rack_code", ASCENDING)
+        )
+
+        available_racks.extend(existing_racks)
+
+        empty_racks = list(
+            self.racks.find({"status": RackStatus.EMPTY.value}).sort(
+                "rack_code", ASCENDING
+            )
+        )
+
+        available_racks.extend(empty_racks)
+
+        if available_racks:
+            return available_racks
+
+        return []
+
+    # --------------------------------------------------------------------------
+    # NHẬP HÀNG VỚI TỰ ĐỘNG CHUYỂN RACK KHI ĐẦY
+    # --------------------------------------------------------------------------
+    def add_item(self, product_id: str, batch_number: str) -> Dict:
+
+        available_racks = self.find_available_rack_for_product(product_id)
+        # print("available_racks", available_racks)
+        if not available_racks:
+            raise ValueError(f"❌ Không thể nhập {product_id}: Không có rack khả dụng")
+
+        target_rack = None
+        position_index = None
+
+        for rack in available_racks:
+            rack_code = rack["rack_code"]
+
+            if rack["product_id"] is not None and rack["product_id"] != product_id:
+                continue  # Bỏ qua rack chứa sản phẩm khác
+
+            # Tìm vị trí nhập hợp lệ trong rack này
+            pos_idx = self._find_inbound_position_in_rack(rack)
+            if pos_idx is not None:
+                target_rack = rack
+                position_index = pos_idx
+                break
+            else:
+                print(f"⚠️ Rack {rack_code} đã đầy, thử rack khác...")
+
+        if not target_rack or position_index is None:
+            raise ValueError(
+                f"❌ Không thể nhập {product_id}: Tất cả rack khả dụng đều đã đầy"
+            )
+
+        rack_code = target_rack["rack_code"]
+        # rack_code = target_rack["rack_code"]
+        # print("rack_code", rack_code)
+        # print("rack_value", available_racks)
+        # print("position_index", position_index)
+        selected_rack = next(
+            (rack for rack in available_racks if rack["rack_code"] == rack_code), None
+        )
+        _position_data = selected_rack["positions"][position_index]
+        _mmm = _position_data[0]
+        print("_mmm", _mmm)
+        # print("_position_data", _position_data)
+        # print("position", _position_data["robot_point"][0])
+
+        # VALIDATION: Kiểm tra không tạo lỗ trống
+        if not self._validate_inbound_position(target_rack, position_index):
+            leftmost_occupied = None
+            for i in range(4):
+                if target_rack["positions"][i]["status"] == "occupied":
+                    leftmost_occupied = i
+                    break
+
+            allowed_position = (
+                3 if leftmost_occupied is None else (leftmost_occupied - 1)
+            )
+            raise ValueError(
+                f"❌ VI PHẠM QUY TẮC! Không thể nhập vào P{position_index}. "
+                f"Phải nhập vào P{allowed_position} để không tạo lỗ trống."
+            )
+
+        # Tạo item mới
+        item_id = f"ITEM-{uuid.uuid4().hex[:8].upper()}"
+        new_item = {
+            "item_id": item_id,
+            "product_id": product_id,
+            "batch_number": batch_number,
+            "entry_date": datetime.now(UTC),
+        }
+
+        new_occupied = target_rack["occupied_count"] + 1
+        new_available = target_rack["available_count"] - 1
+        new_status = (
+            RackStatus.FULL.value if new_available == 0 else RackStatus.PARTIAL.value
+        )
+        new_product_id = product_id if new_occupied > 0 else None
+
+        self.racks.update_one(
+            {"rack_code": rack_code},
+            {
+                "$set": {
+                    f"positions.{position_index}.status": "occupied",
+                    f"positions.{position_index}.item": new_item,
+                    "product_id": new_product_id,
+                    "status": new_status,
+                    "occupied_count": new_occupied,
+                    "available_count": new_available,
+                    "updated_at": datetime.now(UTC),
+                }
+            },
+        )
+
+        # Ghi log giao dịch
+        self.transactions.insert_one(
+            {
+                "transaction_id": f"TXN-{uuid.uuid4().hex[:6].upper()}",
+                "type": TransactionType.INBOUND.value,
+                "rack_code": rack_code,
+                "position_index": position_index,
+                "item_id": item_id,
+                "product_id": product_id,
+                "batch_number": batch_number,
+                "timestamp": datetime.now(UTC),
+            }
+        )
+
+        return {
+            "item_id": item_id,
+            "rack_code": rack_code,
+            # "_position_data": _position_data["robot_point"][0,
+            "position_index": position_index,
+            "product_id": product_id,
+        }
+
+    # --------------------------------------------------------------------------
+    # LẤY HÀNG THEO FIFO
+    # --------------------------------------------------------------------------
+    def remove_item(self, product_id: str) -> Dict:
+        """Lấy hàng từ rack chứa sản phẩm theo FIFO P3→P2→P1→P0"""
+
+        # Tìm rack chứa sản phẩm này có hàng
+        target_rack = self.racks.find_one(
+            {"product_id": product_id, "occupied_count": {"$gt": 0}}
+        )
+
+        if not target_rack:
+            return None
+            raise ValueError(f"❌ Không tìm thấy rack chứa {product_id} có hàng")
+
+        rack_code = target_rack["rack_code"]
+
+        # Tìm vị trí xuất
+        position_index = self._find_outbound_position_in_rack(target_rack)
+        if position_index is None:
+            raise ValueError(f"❌ Rack {rack_code} đang trống")
+
+        item = target_rack["positions"][position_index]["item"]
+
+        # Cập nhật thông tin rack
+        # new_occupied = target_rack["occupied_count"] - 1
+        # new_available = target_rack["available_count"] + 1
+        # new_status = (
+        #     RackStatus.EMPTY.value if new_occupied == 0 else RackStatus.PARTIAL.value
+        # )
+        # new_product_id = product_id if new_occupied > 0 else None
+
+        self.racks.update_one(
+            {"rack_code": rack_code},
+            {
+                "$set": {  # ✅ Đúng cú pháp MongoDB update operator
+                    f"positions.{position_index}.status": "occupied",
+                    # f"positions.{position_index}.item": None,
+                    # "product_id": new_product_id,
+                    # "status": new_status,
+                    # "occupied_count": new_occupied,
+                    # "available_count": new_available,
+                    "updated_at": datetime.now(UTC),  # ✅ Đúng syntax datetime
+                }
+            },
+        )
+
+        # Ghi log
+        self.transactions.insert_one(
+            {
+                "transaction_id": f"TXN-{uuid.uuid4().hex[:6].upper()}",
+                "type": TransactionType.OUTBOUND.value,
+                "rack_code": rack_code,
+                "position_index": position_index,
+                "item_id": item["item_id"],
+                "product_id": product_id,
+                "batch_number": item["batch_number"],
+                "timestamp": datetime.now(UTC),  # ✅ Đúng syntax datetime
+            }
+        )
+
+        print(
+            f"✅ Lấy item {item['item_id']} từ {rack_code}-P{position_index} (Sản phẩm: {product_id})"
+        )
+        return {
+            "item_id": item["item_id"],
+            "rack_code": rack_code,
+            "position_index": position_index,
+            "product_id": product_id,
+        }
+
+    # --------------------------------------------------------------------------
+    # HIỂN THỊ TẤT CẢ RACKS
+    # --------------------------------------------------------------------------
+    def display_all_racks(self):
+        """Hiển thị trạng thái tất cả racks"""
+
+        racks = list(self.racks.find().sort("rack_code", ASCENDING))
+        if not racks:
+            print("❌ Không có rack nào trong kho")
+            return
+
+        print(f"\n{'='*80}")
+        print(f"  DANH SÁCH RACKS ({len(racks)} racks)")
+        print(f"{'='*80}")
+
+        for rack in racks:
+            print(
+                f"\n  📦 RACK: {rack['rack_code']} | {rack['status'].upper():8} | "
+                f"Đã dùng: {rack['occupied_count']}/{rack['capacity']} | "
+                f"Sản phẩm: {rack['product_id'] or 'Trống'}"
+            )
+
+            # Hiển thị vị trí
+            line = "     "
+            for pos in rack["positions"]:
+                line += f" P{pos['position_index']}:"
+                line += f" {'OCC' if pos['status'] == 'occupied' else 'EMP'} "
+            print(line)
+
+            # Hiển thị item ID
+            line = "     "
+            for pos in rack["positions"]:
+                if pos["item"]:
+                    line += f" {pos['item']['item_id'][-6:]} "
+                else:
+                    line += "  --  "
+            print(line)
+
+    # --------------------------------------------------------------------------
+    # HIỂN THỊ RACK CỤ THỂ
+    # --------------------------------------------------------------------------
+    def display_rack(self, rack_code: str):
+        """Hiển thị chi tiết 1 rack"""
+
+        rack = self.racks.find_one({"rack_code": rack_code})
+        if not rack:
+            print(f"❌ Rack {rack_code} không tồn tại")
+            return
+
+        print(f"\n{'═'*70}")
+        product_info = f" | Sản phẩm: {rack['product_id'] or 'Trống'}"
+        print(
+            f"  RACK: {rack['rack_code']} | {rack['status'].upper():8} | "
+            f"Đã dùng: {rack['occupied_count']}/{rack['capacity']}{product_info}"
+        )
+        print(f"{'═'*70}")
+        print("\n  ← FRONT (Xuất sau)                    BACK (Xuất trước) →\n")
+
+        print("  ┌──────────────┬──────────────┬──────────────┬──────────────┐")
+        line = "  │"
+        for pos in rack["positions"]:
+            line += f"      P{pos['position_index']}      │"
+        print(line)
+
+        line = "  │"
+        for pos in rack["positions"]:
+            if pos["status"] == "occupied":
+                line += f"   OCCUPIED   │"
+            else:
+                line += f"    EMPTY     │"
+        print(line)
+
+        line = "  │"
+        for pos in rack["positions"]:
+            if pos["item"]:
+                short_id = pos["item"]["item_id"][-6:]
+                line += f"   {short_id:^8}  │"
+            else:
+                line += f"      --      │"
+        print(line)
+
+        print("  └──────────────┴──────────────┴──────────────┴──────────────┘")
+
+        next_in = self._find_inbound_position_in_rack(rack)
+        next_out = self._find_outbound_position_in_rack(rack)
+
+        arrow = "  "
+        for i in range(4):
+            if i == next_in and rack["available_count"] > 0:
+                arrow += "     ↓ IN      "
+            elif i == next_out and rack["occupied_count"] > 0:
+                arrow += "     ↑ OUT     "
+            else:
+                arrow += "               "
+        print(arrow)
+
+        occupied = [p for p in rack["positions"] if p["status"] == "occupied"]
+        if occupied:
+            print(f"\n  📦 Danh sách items ({len(occupied)} items):")
+            for pos in occupied:
+                item = pos["item"]
+                print(
+                    f"     P{pos['position_index']}: {item['item_id']} | "
+                    f"Batch: {item['batch_number']}"
+                )
+
+        print()
+
+
+# ------------------------------------------------------------------------------
+# DEMO QUY TRÌNH HOÀN CHỈNH
+# ------------------------------------------------------------------------------
+def demo():
+
+    warehouse = WarehouseMultiRackFIFO()
+
+    # warehouse.add_item("PROD-002", "BATCH-2024-010")
+
+    # # BƯỚC 1: Tạo 6 racks
+    # print("\n" + "─" * 80)
+    # print("BƯỚC 1: TẠO 6 RACKS")
+    # print("─" * 80)
+    # warehouse.create_rack("RACK-A-001")
+    # warehouse.create_rack("RACK-A-002")
+    # warehouse.create_rack("RACK-A-003")
+    # warehouse.create_rack("RACK-A-004")
+    # warehouse.create_rack("RACK-A-005")
+    # warehouse.create_rack("RACK-A-006")
+    # warehouse.create_rack("RACK-A-007")
+    # warehouse.create_rack("RACK-A-008")
+    # warehouse.create_rack("RACK-A-009")
+
+
+# warehouse.display_all_racks()
+
+# # BƯỚC 2: NHẬP HÀNG THEO QUY TẮC (RACK-A-001 sẽ đầy sau 4 lần nhập)
+# print("\n" + "─" * 80)
+# print("BƯỚC 2: NHẬP 5 ITEM PROD-001 (TỰ ĐỘNG CHUYỂN RACK KHI RACK-A-001 ĐẦY)")
+# print("─" * 80)
+# warehouse.add_item("PROD-001", "BATCH-2024-001")  # RACK-A-001-P3
+# warehouse.add_item("PROD-001", "BATCH-2024-002")  # RACK-A-001-P2
+# warehouse.add_item("PROD-001", "BATCH-2024-003")  # RACK-A-001-P1
+# warehouse.add_item("PROD-001", "BATCH-2024-004")  # RACK-A-001-P0 (ĐẦY)
+# warehouse.add_item(
+#     "PROD-001", "BATCH-2024-005"
+# )  # TỰ ĐỘNG CHUYỂN SANG RACK-A-002-P3
+# warehouse.display_all_racks()
+
+# # BƯỚC 3: NHẬP HÀNG SẢN PHẨM KHÁC (TỰ ĐỘNG CHỌN RACK TRỐNG)
+# print("\n" + "─" * 80)
+# print("BƯỚC 3: NHẬP HÀNG PROD-002 (TỰ ĐỘNG CHỌN RACK TRỐNG)")
+# print("─" * 80)
+# warehouse.add_item("PROD-002", "BATCH-2024-010")
+# warehouse.add_item("PROD-002", "BATCH-2024-011")
+# warehouse.display_all_racks()
+
+# # BƯỚC 4: XUẤT HÀNG THEO FIFO
+# print("\n" + "─" * 80)
+# print("BƯỚC 4: XUẤT HÀNG PROD-001 THEO FIFO")
+# print("─" * 80)
+# warehouse.remove_item("PROD-001")  # RACK-A-001-P3
+# warehouse.remove_item("PROD-001")  # RACK-A-001-P2
+# warehouse.remove_item("PROD-001")  # RACK-A-001-P3
+# warehouse.remove_item("PROD-001")  # RACK-A-001-P2
+# warehouse.display_rack("RACK-A-001")
+
+# print("\n" + "=" * 80)
+# print("  ✅ DEMO HOÀN THÀNH - HỆ THỐNG HOÀN HẢO")
+# print("=" * 80 + "\n")
+
+
+if __name__ == "__main__":
+    try:
+        demo()
+    except Exception as e:
+        print(f"\n❌ Lỗi: {str(e)}")
+        import traceback
+
+        traceback.print_exc()
